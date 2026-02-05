@@ -6,7 +6,7 @@ import os
 from sklearn.ensemble import RandomForestClassifier
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Turf IA Ultimate", layout="wide", page_icon="🏇")
+st.set_page_config(page_title="Turf IA Universal", layout="wide", page_icon="🏇")
 DB_FILE = "base_donnees_turf.csv"
 
 # ==========================================
@@ -29,15 +29,15 @@ def check_password():
         return False
     return True
 
-# On active la sécurité uniquement si on est sur le Cloud (si secrets détectés)
+# Active la sécurité si des secrets sont configurés sur le Cloud
 try:
     if st.secrets and not check_password():
         st.stop()
 except FileNotFoundError:
-    pass # En local sur ton PC, ça passe sans mot de passe
+    pass # Mode local sans mot de passe
 
 # ==========================================
-# 1. FONCTIONS INTELLIGENTES
+# 1. FONCTIONS DE CALCUL
 # ==========================================
 def calcul_musique_severe(liste_musique):
     if not liste_musique: return 0
@@ -60,119 +60,155 @@ def calcul_regularite(liste_musique):
 def get_historique_cheval(nom_cheval, df_bdd):
     """Mémoire : Cherche si le cheval a déjà gagné dans le passé"""
     if df_bdd is None or df_bdd.empty: return 0
+    if not nom_cheval: return 0
+    # Recherche insensible à la casse
     hist = df_bdd[df_bdd['Cheval'].str.upper() == nom_cheval.upper()]
     if len(hist) == 0: return 0
     # Calcul : % de victoire historique
     return (len(hist[hist['Gagnant'] == 1]) / len(hist)) * 100
 
-def scanner_ultimate(texte_brut):
+# ==========================================
+# 2. SCANNER INTELLIGENT (V19 - MULTI FORMATS)
+# ==========================================
+def scanner_v19_universal(texte_brut):
     lignes = [l.strip() for l in texte_brut.strip().split('\n') if l.strip()]
     data = []
     
-    # 1. Chargement de la mémoire
+    # Chargement Mémoire
     df_history = pd.read_csv(DB_FILE) if os.path.exists(DB_FILE) else None
     
-    # 2. Auto-Détection du Gagnant dans le texte (ex: "Arrivée : 4 - ...")
+    # Détection Gagnant (Arrivée en haut de page)
     gagnant_detecte = 0
     match_arr = re.search(r'(?:Arrivée|Resul|Rapports|1er).*?[:\s-](?<!\d)(\d+)(?!\d)', texte_brut, re.IGNORECASE)
     if match_arr: gagnant_detecte = int(match_arr.group(1))
 
-    # 3. Lecture ligne par ligne
-    i = 0
-    while i < len(lignes):
-        ligne = lignes[i]
-        match_nom = re.match(r'^(\d+)(.+)', ligne)
-        
-        if match_nom:
-            num = int(match_nom.group(1))
-            nom_brut = match_nom.group(2)
+    # Variables pour le parsing par bloc
+    current_horse = {}
+    compteur_auto = 0
+
+    for line in lignes:
+        # A. DÉTECTION DÉBUT CHEVAL (Format: "Nom H6" ou "1 Nom H6")
+        # On cherche une ligne finissant par Sexe+Age (ex: H6, F10, M4)
+        match_start = re.search(r'^(\d+)?\s*(.*?)\s+([HFM]\d+)$', line)
+
+        if match_start:
+            # Si un cheval était déjà en cours, on le sauvegarde
+            if current_horse:
+                # Finalisation du cheval précédent
+                perfs = re.findall(r'\b(\d+[a-zA-Z]|[TDA][a-zA-Z]{0,2})\b', current_horse['Musique'])
+                current_horse['Score_Musique'] = calcul_musique_severe(perfs)
+                current_horse['Regularite'] = int(calcul_regularite(perfs))
+                current_horse['Memoire_IA'] = get_historique_cheval(current_horse['Cheval'], df_history)
+                current_horse['Gagnant'] = 1 if current_horse['Num'] == gagnant_detecte else 0
+                data.append(current_horse)
+
+            # Nouveau cheval
+            compteur_auto += 1
+            num_txt = match_start.group(1)
+            # Si pas de numéro (format Geny), on utilise le compteur automatique
+            num = int(num_txt) if num_txt else compteur_auto
             
-            # Nettoyage Nom & Fers
-            deferre = 2 if 'D4' in nom_brut else (1 if 'DA' in nom_brut or 'DP' in nom_brut else 0)
-            nom_cheval = re.sub(r'(D4|DA|DP|\.)', '', nom_brut).strip()
+            raw_name = match_start.group(2)
             
-            infos = lignes[i+1] if i + 1 < len(lignes) else ""
-            i += 1
+            # Détection Fers dans le nom
+            deferre = 0
+            if 'D4' in raw_name or 'D4' in line: deferre = 2
+            elif 'DA' in raw_name or 'DP' in raw_name or 'P4' in raw_name: deferre = 1
             
-            # Jockey
-            noms = re.findall(r'[A-Z]\.\s?[A-Za-z]+', infos)
-            jockey = noms[0] if noms else "Inconnu"
+            # Nettoyage du nom
+            clean_name = re.sub(r'(D4|DA|DP|P4|TrafoPA|\(BE\)|\.|Porte des oeillères)', '', raw_name).strip()
             
-            # Nettoyage Collage (Chrono/Musique/Cote)
-            infos = re.sub(r'(["\d])(\d+[a-zA-Z])', r'\1 \2', infos)
-            infos = re.sub(r'([a-z])(\d)', r'\1 \2', infos)
+            current_horse = {
+                'Num': num,
+                'Cheval': clean_name,
+                'Jockey': 'Inconnu',
+                'D4': deferre,
+                'Musique': '',
+                'Cote': 50.0
+            }
+            continue
+
+        # B. LECTURE DES DÉTAILS (Si on est dans un bloc cheval)
+        if current_horse:
+            # 1. Jockey & Distance (Ligne avec crochets [2850m])
+            if '[' in line and 'm]' in line:
+                parts = line.split('[')
+                if len(parts) > 0:
+                    current_horse['Jockey'] = parts[0].strip()
+                continue
             
-            perfs = re.findall(r'\b(\d+[a-zA-Z]|[TDA][a-zA-Z]{0,2})\b', infos)
-            musique_txt = " ".join(perfs)
-            
-            # Cotes
-            txt_fin = re.sub(r'\(\d+\)', '', infos)
-            nums = re.findall(r'(?<![a-zA-Z])(\d+[.,]?\d*|[1-9]\d+)(?![a-zA-Z])', txt_fin)
-            cote = 50.0
-            if nums:
-                vals = []
-                for c in nums[-2:]:
-                    try:
-                        v = float(c.replace(',', '.'))
-                        if 1.0 < v < 300: vals.append(v)
-                    except: pass
-                if vals: cote = min(vals)
-            
-            # Interrogation de la Mémoire
-            score_memoire = get_historique_cheval(nom_cheval, df_history)
-            
-            data.append({
-                'Num': num, 'Cheval': nom_cheval, 'Jockey': jockey,
-                'D4': deferre, 'Musique': musique_txt, 
-                'Score_Musique': calcul_musique_severe(perfs),
-                'Regularite': int(calcul_regularite(perfs)), 
-                'Cote': cote, 'Memoire_IA': score_memoire,
-                'Gagnant': 1 if num == gagnant_detecte else 0
-            })
-        i += 1
+            # 2. Musique (Ligne avec des parenthèses d'année ou des perfs)
+            # Ex: 4a (25) 2a...
+            if re.search(r'\d+[am]', line) or 'Da' in line or 'Dm' in line:
+                current_horse['Musique'] = line
+                continue
+                
+            # 3. Cote (Ligne avec juste des chiffres)
+            match_cote = re.match(r'^(\d+[.,]?\d*)$', line.replace(' ', ''))
+            if match_cote:
+                val = float(match_cote.group(1).replace(',', '.'))
+                # On prend la cote la plus basse si plusieurs lignes de chiffres (Cote probable vs Direct)
+                if val < current_horse['Cote']:
+                    current_horse['Cote'] = val
+
+    # Sauvegarde du tout dernier cheval
+    if current_horse:
+        perfs = re.findall(r'\b(\d+[a-zA-Z]|[TDA][a-zA-Z]{0,2})\b', current_horse['Musique'])
+        current_horse['Score_Musique'] = calcul_musique_severe(perfs)
+        current_horse['Regularite'] = int(calcul_regularite(perfs))
+        current_horse['Memoire_IA'] = get_historique_cheval(current_horse['Cheval'], df_history)
+        current_horse['Gagnant'] = 1 if current_horse['Num'] == gagnant_detecte else 0
+        data.append(current_horse)
+
     return pd.DataFrame(data), gagnant_detecte
 
 # ==========================================
-# 2. INTERFACE APP
+# 3. INTERFACE UTILISATEUR
 # ==========================================
-st.title("📱 Turf IA Ultimate")
+st.title("📱 Turf IA Ultimate (V20)")
 
-# Onglets pour mobile
-tab1, tab2 = st.tabs(["📝 Scanner", "📊 Base de Données"])
+tab1, tab2 = st.tabs(["📝 Scanner & Prono", "📊 Gestion Base"])
 
+# --- ONGLET 1 : ANALYSE ---
 with tab1:
-    st.info("Copie toute la page Zone-Turf (Ctrl+A) et colle ici.")
-    texte_input = st.text_area("Partants & Résultats :", height=150)
+    st.info("Compatible : Zone-Turf, Geny, PMU (Copier-coller complet)")
+    texte_input = st.text_area("Colle les partants ici :", height=200)
     
-    if st.button("🚀 ANALYSER LA COURSE"):
+    if st.button("🚀 ANALYSER"):
         if texte_input:
-            df_res, gagnant_auto = scanner_ultimate(texte_input)
+            df_res, gagnant_auto = scanner_v19_universal(texte_input)
             if not df_res.empty:
                 st.session_state['df_course'] = df_res
                 st.session_state['gagnant_suggere'] = gagnant_auto
-                if gagnant_auto > 0: st.success(f"🎯 Gagnant détecté : N°{gagnant_auto}")
+                if gagnant_auto > 0:
+                    st.success(f"🎯 Arrivée détectée : Le N°{gagnant_auto} a gagné !")
             else:
-                st.error("Aucun cheval trouvé.")
+                st.error("Aucun cheval trouvé. Vérifie le format.")
 
     # Affichage Résultats
     if 'df_course' in st.session_state:
         df = st.session_state['df_course']
         
-        # --- CERVEAU HYBRIDE ---
-        # Si on a assez de données (>50), on utilise le Machine Learning
+        # --- CERVEAU (IA vs MATHS) ---
         if os.path.exists(DB_FILE) and len(pd.read_csv(DB_FILE)) > 50:
+            # Mode Machine Learning
             df_hist = pd.read_csv(DB_FILE)
             model = RandomForestClassifier(n_estimators=100, random_state=42)
-            # L'IA utilise la Mémoire + Stats pour apprendre
-            X_train = df_hist[['Score_Musique', 'Regularite', 'D4', 'Cote', 'Memoire_IA']]
-            model.fit(X_train, df_hist['Gagnant'])
             
-            X_today = df[['Score_Musique', 'Regularite', 'D4', 'Cote', 'Memoire_IA']]
+            # On vérifie que les colonnes existent
+            cols_train = ['Score_Musique', 'Regularite', 'D4', 'Cote', 'Memoire_IA']
+            # On nettoie les NaN au cas où
+            df_hist = df_hist.fillna(0)
+            
+            model.fit(df_hist[cols_train], df_hist['Gagnant'])
+            
+            X_today = df[cols_train].fillna(0)
             probs = model.predict_proba(X_today)[:, 1]
             df['Chance %'] = (probs / probs.sum()) * 100
-            msg_ia = "🧠 Mode IA (Machine Learning)"
+            msg_ia = "🧠 Mode IA (Apprentissage Actif)"
         else:
-            # Sinon formule Mathématique
+            # Mode Mathématique
+            # Formule : Cote + Musique + Mémoire + Bonus D4
             df['Points'] = (1/df['Cote']*200) + (df['Score_Musique']*0.4) + df['Memoire_IA']
             df.loc[df['D4']==2, 'Points'] += 15
             df['Chance %'] = (df['Points'] / df['Points'].sum()) * 100
@@ -180,39 +216,63 @@ with tab1:
 
         st.caption(msg_ia)
         
-        # Tableau Simplifié pour Mobile
-        df_show = df[['Num', 'Cheval', 'Cote', 'Chance %']].sort_values(by='Chance %', ascending=False)
+        # Tableau des Résultats
+        # On affiche : Num, Cheval, Musique, Cote, Chance
+        df_show = df[['Num', 'Cheval', 'Musique', 'Cote', 'Chance %']].sort_values(by='Chance %', ascending=False)
+        
         st.dataframe(
             df_show, 
-            column_config={"Chance %": st.column_config.ProgressColumn(format="%.0f%%")},
-            hide_index=True, use_container_width=True
+            column_config={
+                "Chance %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
+                "Cote": st.column_config.NumberColumn(format="%.1f")
+            },
+            hide_index=True, 
+            use_container_width=True
         )
         
         st.divider()
         
-        # SAUVEGARDE
+        # --- SECTION SAUVEGARDE ---
         gagnant_suggere = st.session_state.get('gagnant_suggere', 0)
-        idx_defaut = df['Num'].tolist().index(gagnant_suggere) + 1 if gagnant_suggere in df['Num'].tolist() else 0
         
+        # On essaie de pré-remplir le sélecteur
+        try:
+            idx_defaut = df['Num'].tolist().index(gagnant_suggere) + 1 if gagnant_suggere > 0 else 0
+        except:
+            idx_defaut = 0
+
+        st.subheader("💾 Enregistrer le résultat")
         choix = st.selectbox("Qui a gagné ?", [0]+df['Num'].tolist(), index=idx_defaut)
         
-        if st.button("💾 ENREGISTRER"):
+        if st.button("💾 SAUVEGARDER DANS LA BASE"):
             if choix != 0:
                 df['Gagnant'] = 0
                 df.loc[df['Num'] == choix, 'Gagnant'] = 1
-                # On sauvegarde tout ce qui est utile pour l'IA
+                
+                # Colonnes à garder
                 cols = ['Num', 'Cheval', 'Jockey', 'D4', 'Score_Musique', 'Regularite', 'Cote', 'Memoire_IA', 'Gagnant']
+                
+                # Sauvegarde
                 mode = not os.path.exists(DB_FILE)
                 df[cols].to_csv(DB_FILE, mode='a', header=mode, index=False)
-                st.success("✅ Sauvegardé !")
+                st.success(f"✅ Course enregistrée ! Vainqueur : N°{choix}")
             else:
-                st.warning("Choisis un numéro.")
+                st.warning("Merci de choisir un gagnant.")
 
+# --- ONGLET 2 : BASE DE DONNÉES ---
 with tab2:
     if os.path.exists(DB_FILE):
         df_bdd = pd.read_csv(DB_FILE)
         st.metric("Chevaux en mémoire", len(df_bdd))
-        st.dataframe(df_bdd.tail(10)[['Cheval', 'Gagnant']])
-        st.download_button("Télécharger CSV", df_bdd.to_csv(index=False).encode('utf-8'), "turf.csv")
+        st.write("Aperçu des dernières données :")
+        st.dataframe(df_bdd.tail(5))
+        
+        # Bouton Télécharger
+        st.download_button(
+            "📥 Télécharger le fichier CSV (Sauvegarde)", 
+            df_bdd.to_csv(index=False).encode('utf-8'), 
+            "base_donnees_turf.csv",
+            "text/csv"
+        )
     else:
-        st.info("Base vide.")
+        st.info("La base de données est vide pour l'instant.")
